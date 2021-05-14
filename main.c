@@ -19,6 +19,7 @@
 #include "sxiv.h"
 #define _MAPPINGS_CONFIG
 #include "config.h"
+#include "url.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +59,8 @@ int filecnt, fileidx;
 int alternate;
 int markcnt;
 int markidx;
+char **rmfiles;
+int rmcnt, rmidx;
 
 int prefix;
 bool extprefix;
@@ -93,15 +96,22 @@ cursor_t imgcursor[3] = {
 	CURSOR_ARROW, CURSOR_ARROW, CURSOR_ARROW
 };
 
+
+CLEANUP void tmp_unlink(char **rmfiles, int n) {
+	while (n--)
+		unlink(rmfiles[n]);
+}
+
 void cleanup(void)
 {
+	tmp_unlink(rmfiles, rmidx);
 	img_close(&img, false);
 	arl_cleanup(&arl);
 	tns_free(&tns);
 	win_close(&win);
 }
 
-void check_add_file(char *filename, bool given)
+static void internal_check_add_file(char *filename, char *url, bool given)
 {
 	char *path;
 
@@ -124,9 +134,32 @@ void check_add_file(char *filename, bool given)
 
 	files[fileidx].name = estrdup(filename);
 	files[fileidx].path = path;
+#if HAVE_LIBCURL == 1
+	if (url != NULL)
+	{
+		files[fileidx].url = estrdup(url);
+		if (rmidx == rmcnt) {
+			rmcnt *= 2;
+			rmfiles = erealloc(rmfiles, rmcnt * sizeof(char*));
+			memset(&rmfiles[rmcnt/2], 0, rmcnt/2 * sizeof(char*));
+		}
+		rmfiles[rmidx++] = path;
+	}
+#endif /* HAVE_LIBCURL */
 	if (given)
 		files[fileidx].flags |= FF_WARN;
 	fileidx++;
+}
+
+
+void check_add_file(char *filename, bool given)
+{
+	internal_check_add_file(filename, NULL, given);
+}
+
+void check_add_url(char *filename, char *url, bool given)
+{
+	internal_check_add_file(filename, url, given);
 }
 
 void remove_file(int n, bool manual)
@@ -365,8 +398,17 @@ void update_info(void)
 			bar_put(l, "Loading... %0*d", fw, tns.loadnext + 1);
 		else if (tns.initnext < filecnt)
 			bar_put(l, "Caching... %0*d", fw, tns.initnext + 1);
-		else
-			strncpy(l->buf, files[fileidx].name, l->size);
+		else {
+#if HAVE_LIBCURL == 1
+			if (files[fileidx].url != NULL) {
+				strncpy(l->buf, files[fileidx].url, l->size);
+			} else {
+#endif /* HAVE_LIBCURL */
+				strncpy(l->buf, files[fileidx].name, l->size);
+#if HAVE_LIBCURL == 1
+			}
+#endif /* HAVE_LIBCURL */
+		}
 		bar_put(r, "%s%0*d/%d", mark, fw, fileidx + 1, filecnt);
 	} else {
 		bar_put(r, "%s", mark);
@@ -384,8 +426,17 @@ void update_info(void)
 			bar_put(r, "%0*d/%d" BAR_SEP, fn, img.multi.sel + 1, img.multi.cnt);
 		}
 		bar_put(r, "%0*d/%d", fw, fileidx + 1, filecnt);
-		if (info.f.err)
-			strncpy(l->buf, files[fileidx].name, l->size);
+		if (info.f.err) {
+#if HAVE_LIBCURL == 1
+			if (files[fileidx].url != NULL) {
+				strncpy(l->buf, files[fileidx].url, l->size);
+			} else {
+#endif /* HAVE_LIBCURL */
+				strncpy(l->buf, files[fileidx].name, l->size);
+#if HAVE_LIBCURL == 1
+			}
+#endif /* HAVE_LIBCURL */
+		}
 	}
 }
 
@@ -853,6 +904,9 @@ int main(int argc, char **argv)
 	files = emalloc(filecnt * sizeof(*files));
 	memset(files, 0, filecnt * sizeof(*files));
 	fileidx = 0;
+	rmcnt = 16;
+	rmfiles = emalloc(rmcnt * sizeof(char*));
+	rmidx = 0;
 
 	if (options->from_stdin) {
 		n = 0;
@@ -869,6 +923,19 @@ int main(int argc, char **argv)
 		filename = options->filenames[i];
 
 		if (stat(filename, &fstats) < 0) {
+#if HAVE_LIBCURL == 1
+			if (is_url(filename)) {
+				char *tmp;
+
+				if (get_url(filename, &tmp) == 0) {
+					check_add_url(tmp, filename, true);
+					free(tmp);
+					continue;
+				} else {
+					error(0, errno, "%s", filename);
+				}
+			}
+#endif /* HAVE_LIBCURL */
 			error(0, errno, "%s", filename);
 			continue;
 		}
